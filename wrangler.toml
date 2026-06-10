@@ -1,0 +1,21 @@
+name = "oci-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Docker Hub proxy route
+routes = [
+  { pattern = "docker.example.com", custom_domain = true },
+]
+
+# Future registry routes:
+# routes = [
+#   { pattern = "docker.example.com", custom_domain = true },
+#   { pattern = "ghcr.example.com", custom_domain = true },
+#   { pattern = "gcr.example.com", custom_domain = true },
+#   { pattern = "k8s.example.com", custom_domain = true },
+# ]
+
+[dev]
+ip = "0.0.0.0"
+port = 8787
+local_protocol = "http"
