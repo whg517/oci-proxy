@@ -2,20 +2,26 @@ name = "oci-proxy"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# Docker Hub proxy route
+# Cloudflare Custom Domains — one per subdomain
 routes = [
   { pattern = "docker.example.com", custom_domain = true },
 ]
 
-# Future registry routes:
-# routes = [
-#   { pattern = "docker.example.com", custom_domain = true },
-#   { pattern = "ghcr.example.com", custom_domain = true },
-#   { pattern = "gcr.example.com", custom_domain = true },
-#   { pattern = "k8s.example.com", custom_domain = true },
-# ]
+# To add more registries:
+#   1. Add env.REGISTRIES below (e.g., REGISTRIES = "ghcr,gcr,k8s")
+#   2. Add corresponding routes above
+#   3. Add DNS CNAME records pointing to the Worker
 
 [dev]
 ip = "0.0.0.0"
 port = 8787
 local_protocol = "http"
+
+# ─── Environment Variables ──────────────────────────────────────
+# REGISTRIES: Comma-separated registry prefixes to enable.
+# "docker" is always enabled by default.
+#
+# Examples:
+#   REGISTRIES = ""          → only docker (default)
+#   REGISTRIES = "ghcr"      → docker + ghcr
+#   REGISTRIES = "ghcr,gcr"  → docker + ghcr + gcr

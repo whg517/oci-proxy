@@ -1,74 +1,120 @@
 /**
  * oci-proxy - Cloudflare Worker for OCI container registry proxy
  *
- * Phase 1: Docker Hub proxy
- *   docker.example.com → registry-1.docker.io
+ * Subdomain routing:
+ *   docker.<domain> → registry-1.docker.io  (always enabled)
+ *   ghcr.<domain>   → ghcr.io               (opt-in via REGISTRIES env)
+ *   gcr.<domain>    → gcr.io                (opt-in via REGISTRIES env)
+ *   k8s.<domain>    → registry.k8s.io       (opt-in via REGISTRIES env)
  *
- * Future registries (subdomain routing):
- *   ghcr.example.com → ghcr.io
- *   gcr.example.com  → gcr.io
- *   k8s.example.com  → registry.k8s.io
+ * Environment variables (set via wrangler.toml or Cloudflare Dashboard):
+ *   REGISTRIES  - Comma-separated registry prefixes to enable (default: empty = only docker)
+ *                 Example: "ghcr,gcr,k8s" enables ghcr.<domain>, gcr.<domain>, k8s.<domain>
+ *                 "docker" prefix is always enabled and cannot be disabled.
  *
- * Architecture:
- *   1. Route by incoming Host header (subdomain prefix → upstream registry)
- *   2. For Docker Hub: rewrite Www-Authenticate realm to proxy auth endpoint,
- *      handle library image redirects, and manually follow blob 307 redirects
- *   3. For other registries: generic passthrough (future)
+ * Deployment:
+ *   1. Set REGISTRIES env var in wrangler.toml or Cloudflare Dashboard
+ *   2. Add Cloudflare Routes / Custom Domains for each subdomain
+ *   3. Add DNS records for each subdomain pointing to the Worker
+ *   4. No code changes needed — just config + DNS
  */
 
-// ─── Route Configuration ────────────────────────────────────────────
+// ─── Built-in Registry Route Table ─────────────────────────────────
+// prefix → upstream registry URL
+// "docker" is always enabled; others require REGISTRIES env var
 
-const DOCKER_HUB = "https://registry-1.docker.io";
-
-/** subdomain prefix → upstream registry URL */
-const ROUTES: Record<string, string> = {
-  "docker.": DOCKER_HUB,
-  // Future:
-  // "ghcr.": "https://ghcr.io",
-  // "gcr.": "https://gcr.io",
-  // "k8s.": "https://registry.k8s.io",
+const REGISTRY_TABLE: Record<string, string> = {
+  docker: "https://registry-1.docker.io",
+  ghcr: "https://ghcr.io",
+  gcr: "https://gcr.io",
+  "k8s": "https://registry.k8s.io",
 };
+
+const DEFAULT_REGISTRY = "docker";
 
 // ─── Entry Point ──────────────────────────────────────────────────
 
+interface Env {
+  REGISTRIES?: string;
+}
+
 export default {
-  async fetch(request: Request, _env: {}, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Root → redirect to /v2/ (registry API version check)
     if (url.pathname === "/") {
       return Response.redirect(`${url.protocol}//${url.host}/v2/`, 301);
     }
 
-    // Resolve upstream from hostname
-    const upstream = resolveUpstream(url.hostname);
-    if (!upstream) {
+    // Resolve: extract subdomain prefix from hostname
+    const prefix = resolvePrefix(url.hostname);
+    if (!prefix) {
       return new Response(
-        JSON.stringify({ error: "Unknown registry", available_routes: ROUTES }, null, 2),
+        JSON.stringify({
+          error: "Unknown registry",
+          enabled: listEnabledRegistries(env),
+        }, null, 2),
         { status: 404, headers: { "Content-Type": "application/json" } },
       );
     }
 
-    // Docker Hub: special auth + redirect handling
-    if (upstream === DOCKER_HUB) {
+    const upstream = REGISTRY_TABLE[prefix];
+    if (!upstream) {
+      return new Response(
+        JSON.stringify({
+          error: "Unsupported registry prefix",
+          prefix,
+          enabled: listEnabledRegistries(env),
+        }, null, 2),
+        { status: 404, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // Docker Hub: special auth + redirect + blob handling
+    if (prefix === "docker") {
       return handleDockerHub(request, url);
     }
 
-    // Other registries: generic passthrough (future)
+    // Other registries: generic passthrough
     return genericProxy(request, upstream);
   },
 };
 
-// ─── Upstream Resolution ──────────────────────────────────────────
+// ─── Prefix Resolution ───────────────────────────────────────────
 
-function resolveUpstream(hostname: string): string | undefined {
-  for (const [prefix, target] of Object.entries(ROUTES)) {
-    // Match "docker.example.com" against prefix "docker."
-    if (hostname.startsWith(prefix)) {
-      return target;
+/** Extract subdomain prefix from hostname: "docker.example.com" → "docker" */
+function resolvePrefix(hostname: string): string | null {
+  const parts = hostname.split(".");
+  if (parts.length < 2) return null;
+  return parts[0];
+}
+
+/** Parse REGISTRIES env into a set of enabled prefixes (docker is always included) */
+function getEnabledPrefixes(env: Env): Set<string> {
+  const enabled = new Set<string>([DEFAULT_REGISTRY]);
+  if (env.REGISTRIES) {
+    for (const r of env.REGISTRIES.split(",").map(s => s.trim()).filter(Boolean)) {
+      enabled.add(r);
     }
   }
-  return undefined;
+  return enabled;
+}
+
+/** Check if a prefix is enabled */
+function isEnabled(env: Env, prefix: string): boolean {
+  return getEnabledPrefixes(env).has(prefix);
+}
+
+/** List enabled registries for error responses */
+function listEnabledRegistries(env: Env): string[] {
+  const enabled: string[] = [];
+  for (const prefix of getEnabledPrefixes(env)) {
+    const upstream = REGISTRY_TABLE[prefix];
+    if (upstream) {
+      enabled.push(`${prefix}.${prefix === DEFAULT_REGISTRY ? "<domain>" : "<domain>"} → ${upstream}`);
+    }
+  }
+  return enabled;
 }
 
 // ─── Docker Hub Handler ───────────────────────────────────────────
@@ -78,6 +124,8 @@ function resolveUpstream(hostname: string): string | undefined {
 //   2. Client GET /v2/auth?scope=... → proxy to auth.docker.io/token?...
 //   3. Client GET /v2/<image>/manifests/<ref> with Bearer token
 //   4. Client GET /v2/<image>/blobs/<digest> with Bearer token (307 → CDN)
+
+const DOCKER_HUB = REGISTRY_TABLE.docker;
 
 async function handleDockerHub(request: Request, url: URL): Promise<Response> {
   const authorization = request.headers.get("Authorization");
@@ -100,7 +148,6 @@ async function handleDockerHub(request: Request, url: URL): Promise<Response> {
   }
 
   // Docker Hub library images: /v2/<image>/... → /v2/library/<image>/...
-  // Docker daemon sends "nginx" without "library/" prefix for official images
   if (shouldInsertLibrary(url.pathname)) {
     const redirectUrl = new URL(url);
     redirectUrl.pathname = insertLibraryPrefix(redirectUrl.pathname);
@@ -112,10 +159,9 @@ async function handleDockerHub(request: Request, url: URL): Promise<Response> {
   const resp = await fetch(new Request(targetUrl.toString(), {
     method: request.method,
     headers: request.headers,
-    redirect: "manual", // Don't auto-follow Docker Hub blob 307 redirects
+    redirect: "manual",
   }));
 
-  // Rewrite 401 auth challenge to point back to our proxy
   if (resp.status === 401) {
     return buildUnauthorized(url);
   }
@@ -136,7 +182,6 @@ async function handleDockerHub(request: Request, url: URL): Promise<Response> {
  * Fixes the scope for library images (e.g., "nginx" → "library/nginx").
  */
 async function handleDockerHubAuth(url: URL, authorization: string | null): Promise<Response> {
-  // Get the real auth challenge from Docker Hub
   const resp = await fetch(DOCKER_HUB + "/v2/", { redirect: "follow" });
   if (resp.status !== 401 || !resp.headers.get("WWW-Authenticate")) {
     return resp;
@@ -149,7 +194,6 @@ async function handleDockerHubAuth(url: URL, authorization: string | null): Prom
     tokenUrl.searchParams.set("service", service);
   }
 
-  // Pass through scope from client, fixing library prefix if needed
   const scope = url.searchParams.get("scope");
   if (scope) {
     tokenUrl.searchParams.set("scope", fixLibraryScope(scope));
@@ -165,7 +209,6 @@ async function handleDockerHubAuth(url: URL, authorization: string | null): Prom
 
 // ─── Auth Helpers ─────────────────────────────────────────────────
 
-/** Build a 401 response with Www-Authenticate pointing to our proxy's auth endpoint */
 function buildUnauthorized(url: URL): Response {
   return new Response(JSON.stringify({ message: "UNAUTHORIZED" }), {
     status: 401,
@@ -176,7 +219,6 @@ function buildUnauthorized(url: URL): Response {
   });
 }
 
-/** Parse Www-Authenticate header: Bearer realm="...",service="..." */
 function parseWwwAuthenticate(header: string): { realm: string; service: string } {
   const result: Record<string, string> = {};
   const re = /(\w+)="([^"]+)"/g;
@@ -189,16 +231,6 @@ function parseWwwAuthenticate(header: string): { realm: string; service: string 
 
 // ─── Docker Hub Library Image Helpers ─────────────────────────────
 
-/**
- * Check if the path needs "library/" inserted.
- * Official images like nginx are requested as /v2/nginx/manifests/latest
- * but Docker Hub expects /v2/library/nginx/manifests/latest.
- *
- * Path structure:
- *   /v2/nginx/manifests/latest    → 5 parts → needs library/
- *   /v2/library/nginx/manifests/ → 6 parts → already has library/
- *   /v2/myuser/myimage/manifests → 6 parts → namespaced, no library/
- */
 function shouldInsertLibrary(pathname: string): boolean {
   const parts = pathname.split("/");
   return (
@@ -210,18 +242,12 @@ function shouldInsertLibrary(pathname: string): boolean {
   );
 }
 
-/** Insert "library" at position 2: /v2/nginx/... → /v2/library/nginx/... */
 function insertLibraryPrefix(pathname: string): string {
   const parts = pathname.split("/");
   parts.splice(2, 0, "library");
   return parts.join("/");
 }
 
-/**
- * Fix auth scope for library images.
- * Docker daemon sends scope="repository:nginx:pull" for official images,
- * but Docker Hub expects scope="repository:library/nginx:pull".
- */
 function fixLibraryScope(scope: string): string {
   const parts = scope.split(":");
   if (parts.length === 3 && !parts[1].includes("/")) {
@@ -230,7 +256,7 @@ function fixLibraryScope(scope: string): string {
   return parts.join(":");
 }
 
-// ─── Generic Proxy (for future registries) ────────────────────────
+// ─── Generic Proxy ─────────────────────────────────────────────────
 
 async function genericProxy(request: Request, upstream: string): Promise<Response> {
   const url = new URL(request.url);

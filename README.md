@@ -8,86 +8,130 @@ Cloudflare Worker 代理 OCI 容器镜像仓库，解决国内无法访问 Docke
 docker pull nginx:latest
   │
   ▼
-docker daemon (daemon.json 配置 registry-mirrors)
+docker daemon / containerd (配置 registry mirror)
   │
   ▼
-docker.example.com  ← Cloudflare Worker 代理
-  │  子域名路由
-  ├── docker.example.com → registry-1.docker.io (Docker Hub) ✅ Phase 1
-  ├── ghcr.example.com   → ghcr.io              (GHCR)     🔜 Phase 2
-  ├── gcr.example.com    → gcr.io               (GCR)      🔜 Phase 2
-  └── k8s.example.com    → registry.k8s.io      (k8s.io)   🔜 Phase 2
+docker.<your-domain>  ← Cloudflare Worker 代理
+  │  子域名自动路由（无需改代码）
+  ├── docker.<domain> → registry-1.docker.io  (默认启用)
+  ├── ghcr.<domain>   → ghcr.io               (REGISTRIES=ghcr)
+  ├── gcr.<domain>    → gcr.io                (REGISTRIES=gcr)
+  └── k8s.<domain>    → registry.k8s.io       (REGISTRIES=k8s)
 ```
 
-## Phase 1: Docker Hub
+## 快速开始
 
-### Docker daemon 配置
+### 1. 部署 Worker
+
+```bash
+npm install
+npm run deploy
+```
+
+### 2. Docker 配置
 
 ```bash
 sudo tee /etc/docker/daemon.json << 'EOF'
 {
-  "registry-mirrors": ["https://docker.example.com"]
+  "registry-mirrors": ["https://docker.<your-domain>"]
 }
 EOF
 sudo systemctl restart docker
 ```
 
-### containerd 配置
+### 3. 验证
 
+```bash
+docker pull nginx:alpine
+```
+
+## 添加新注册表（不改代码）
+
+只需三步：
+
+### 1. 设置环境变量
+
+在 `wrangler.toml` 中添加：
 ```toml
-# /etc/containerd/config.toml
-[plugins."io.containerd.grpc.v1.cri".registry.mirrors]
-  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
-    endpoint = ["https://docker.example.com"]
+[vars]
+REGISTRIES = "ghcr,gcr,k8s"
 ```
 
-### 验证
+或在 Cloudflare Dashboard → Worker → Settings → Variables 中设置。
 
-```bash
-docker pull nginx:latest
-docker pull redis:alpine
-docker pull golang:1.23
+### 2. 添加 Custom Domain
+
+在 `wrangler.toml` 的 `routes` 中添加：
+```toml
+routes = [
+  { pattern = "docker.<your-domain>", custom_domain = true },
+  { pattern = "ghcr.<your-domain>", custom_domain = true },
+  { pattern = "gcr.<your-domain>", custom_domain = true },
+  { pattern = "k8s.<your-domain>", custom_domain = true },
+]
 ```
 
-## 开发
+### 3. 添加 DNS 解析
 
-```bash
-# 安装依赖
-npm install
+在 Cloudflare DNS 中添加对应子域名的 CNAME 记录指向 Worker。
 
-# 本地开发 (监听 0.0.0.0:8787)
-npm run dev
-
-# 本地测试 (使用 --env dev 或设置 DOCKER_HUB 测试)
-curl -I http://localhost:8787/v2/
-```
-
-## 部署
+### 4. 重新部署
 
 ```bash
 npm run deploy
 ```
 
-## 关键技术点
+## containerd / Kubernetes 配置
 
-### Docker Hub 认证流程
+### kind 集群
 
-1. Docker daemon 请求 `/v2/` → 收到 401 + `Www-Authenticate` 头
-2. Worker 重写 `Www-Authenticate` 中的 `realm` 指向自己的 `/v2/auth`
-3. Docker daemon 请求 `/v2/auth?scope=...` → Worker 代理到 `auth.docker.io/token`
-4. 获取 Bearer Token 后，后续请求带上 Token 转发到 `registry-1.docker.io`
+```yaml
+# kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: my-cluster
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+      [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+        endpoint = ["https://docker.<your-domain>"]
+```
 
-### Docker Hub Library 镜像处理
+### 原生 containerd
 
-官方镜像（如 `nginx`）在 Docker Hub 上的实际路径是 `library/nginx`。
-Docker daemon 发送的是 `nginx`，Worker 需要自动补全 `library/` 前缀：
-- 路径：`/v2/nginx/manifests/latest` → 301 重定向到 `/v2/library/nginx/manifests/latest`
-- Scope：`repository:nginx:pull` → `repository:library/nginx:pull`
+```toml
+# /etc/containerd/config.toml
+[plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+    endpoint = ["https://docker.<your-domain>"]
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."ghcr.io"]
+    endpoint = ["https://ghcr.<your-domain>"]
+```
 
-### Blob 307 重定向
+## 环境变量
 
-Docker Hub 的 blob 下载会返回 307 重定向到 CDN。
-Worker 设置 `redirect: "manual"` 手动拦截 307，然后自行跟随重定向。
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `REGISTRIES` | 启用的注册表前缀（逗号分隔） | `""` (仅 docker) |
+
+`docker` 前缀始终启用，无需在 `REGISTRIES` 中指定。
+
+## 支持的注册表
+
+| 前缀 | 上游 | 状态 |
+|------|------|------|
+| `docker` | registry-1.docker.io | 默认启用 |
+| `ghcr` | ghcr.io | opt-in |
+| `gcr` | gcr.io | opt-in |
+| `k8s` | registry.k8s.io | opt-in |
+
+## 开发
+
+```bash
+npm run dev    # 本地开发 (http://localhost:8787)
+npm run deploy # 部署到 Cloudflare
+npm run tail   # 查看实时日志
+```
 
 ## License
 
