@@ -3,14 +3,20 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
 # ─── Custom Domains ────────────────────────────────────────────────
-# Custom domains are managed via Cloudflare Dashboard (not in this file
-# to keep real domain names out of version control).
+# This file is a template — it does NOT contain real domain names.
 #
-# In Dashboard → Workers → oci-proxy → Settings → Triggers → Custom Domains, add:
-#   docker.<your-domain>   → always enabled
-#   ghcr.<your-domain>     → enabled when REGISTRIES contains "ghcr"
-#   gcr.<your-domain>      → enabled when REGISTRIES contains "gcr"
-#   k8s.<your-domain>      → enabled when REGISTRIES contains "k8s"
+# For deployment, copy this file to wrangler-deploy.toml and fill in
+# your actual domains in the routes below. wrangler deploy -c wrangler-deploy.toml
+# will automatically create Custom Domains and DNS records.
+#
+# wrangler-deploy.toml is gitignored and should never be committed.
+#
+# routes = [
+#   { pattern = "docker.your-domain.com", custom_domain = true },
+#   { pattern = "ghcr.your-domain.com",   custom_domain = true },
+#   { pattern = "gcr.your-domain.com",    custom_domain = true },
+#   { pattern = "k8s.your-domain.com",    custom_domain = true },
+# ]
 
 [vars]
 REGISTRIES = "ghcr,gcr,k8s"

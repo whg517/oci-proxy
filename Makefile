@@ -1,7 +1,7 @@
 .PHONY: dev deploy test test-e2e test-docker-hub test-kind clean-e2e clean help
 
 # ─── Variables ────────────────────────────────────────────────────
-PROXY_URL  ?= https://docker.mwh122.com
+PROXY_URL  ?= https://docker.example.com
 NODE_BIN   := node_modules/.bin
 
 # ─── Development ─────────────────────────────────────────────────
