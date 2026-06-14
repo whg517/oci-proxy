@@ -2,3 +2,5 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+wrangler-deploy.toml
+test-registries.sh

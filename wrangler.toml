@@ -2,26 +2,20 @@ name = "oci-proxy"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# Cloudflare Custom Domains — one per subdomain
-routes = [
-  { pattern = "docker.example.com", custom_domain = true },
-]
+# ─── Custom Domains ────────────────────────────────────────────────
+# Custom domains are managed via Cloudflare Dashboard (not in this file
+# to keep real domain names out of version control).
+#
+# In Dashboard → Workers → oci-proxy → Settings → Triggers → Custom Domains, add:
+#   docker.<your-domain>   → always enabled
+#   ghcr.<your-domain>     → enabled when REGISTRIES contains "ghcr"
+#   gcr.<your-domain>      → enabled when REGISTRIES contains "gcr"
+#   k8s.<your-domain>      → enabled when REGISTRIES contains "k8s"
 
-# To add more registries:
-#   1. Add env.REGISTRIES below (e.g., REGISTRIES = "ghcr,gcr,k8s")
-#   2. Add corresponding routes above
-#   3. Add DNS CNAME records pointing to the Worker
+[vars]
+REGISTRIES = "ghcr,gcr,k8s"
 
 [dev]
 ip = "0.0.0.0"
 port = 8787
 local_protocol = "http"
-
-# ─── Environment Variables ──────────────────────────────────────
-# REGISTRIES: Comma-separated registry prefixes to enable.
-# "docker" is always enabled by default.
-#
-# Examples:
-#   REGISTRIES = ""          → only docker (default)
-#   REGISTRIES = "ghcr"      → docker + ghcr
-#   REGISTRIES = "ghcr,gcr"  → docker + ghcr + gcr
